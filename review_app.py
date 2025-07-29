@@ -31,7 +31,7 @@ def check_password():
     st.header("病兆標記審核介面 登入")
     password = st.text_input("輸入密碼 (Password)", type="password")
     
-    correct_password = st.secrets.get("APP_PASSWORD", "123")
+    correct_password = st.secrets.get("APP_PASSWORD", "12345")
     if not correct_password:
         st.error("錯誤：找不到設定的 APP_PASSWORD。請確認您的 secrets.toml 檔案已正確設定。")
         return False
