@@ -1,7 +1,3 @@
-# --------------------------------------------------------------------------
-# 醫療影像審核系統 by Streamlit (V5 - GSheets + 返回功能整合版)
-# --------------------------------------------------------------------------
-
 import streamlit as st
 import pandas as pd
 import os
@@ -67,19 +63,17 @@ except FileNotFoundError:
     st.error(f"錯誤：找不到本地影像資料夾 '{ORIGINAL_IMAGE_DIR}'。")
     st.stop()
 
-# --- 【修改點】引入 session_state 來管理當前頁碼 ---
+# --- 引入 session_state 來管理當前頁碼 ---
 if 'current_index' not in st.session_state:
     st.session_state.current_index = 0
 
-# --- 【修改點】讀取 GSheet 資料並處理成「每個檔案的最新一筆紀錄」---
+# --- 讀取 GSheet 資料並處理成「每個檔案的最新一筆紀錄」---
 try:
     with st.spinner("正在從 Google Sheets 同步進度..."):
         existing_data = conn.read(worksheet="Sheet1", usecols=list(range(4)), ttl=5)
         existing_data = existing_data.dropna(how='all')
         
-        # 如果有資料，就找出每個檔案的最新一筆紀錄
         if not existing_data.empty:
-            # 確保時間戳欄位是日期時間格式，以便排序
             existing_data['審核時間 (Timestamp)'] = pd.to_datetime(existing_data['審核時間 (Timestamp)'])
             latest_reviews_df = existing_data.sort_values(
                 '審核時間 (Timestamp)', ascending=False
@@ -91,22 +85,18 @@ except Exception as e:
     st.error(f"讀取 Google Sheet 'Sheet1' 失敗。請確認工作表名稱和權限設定是否正確。錯誤訊息：{e}")
     st.stop()
 
-
-# 檢查是否所有影像都已審核完畢 (判斷條件改為審核紀錄數量)
-if len(latest_reviews_df) >= total_files:
+# 檢查是否所有影像都已審核完畢
+if len(latest_reviews_df) >= total_files and total_files > 0:
     st.success("🎉 所有影像皆已審核完畢！感謝您的辛勞。")
     st.balloons()
-    # ... (後續顯示連結的程式碼不變)
     st.stop()
 
-# --- 【修改點】獲取當前要顯示的影像 (基於 session_state 的 index) ---
+# --- 獲取當前要顯示的影像 ---
 current_index = st.session_state.current_index
 current_image_name = image_files[current_index]
 
-# --- 【修改點】讀取此影像之前的審核記錄，用於恢復介面狀態 ---
-# 在最新的紀錄中查找當前圖片的資料
+# --- 讀取此影像之前的審核記錄，用於恢復介面狀態 ---
 if not latest_reviews_df.empty and current_image_name in latest_reviews_df['影像檔名 (Filename)'].values:
-    # .iloc[0] 是因為 drop_duplicates 後每個檔名只會有一行
     previous_review_series = latest_reviews_df.loc[latest_reviews_df['影像檔名 (Filename)'] == current_image_name].iloc[0]
     previous_options = previous_review_series.get('審核結果 (Review)', '').split('; ')
     previous_notes = previous_review_series.get('醫師備註 (Notes)', '')
@@ -127,7 +117,7 @@ with col2:
     st.image(os.path.join(PREDICTED_IMAGE_DIR, current_image_name), use_container_width=True)
 st.markdown("---")
 
-# 表單僅用於收集輸入
+# 表單僅用於收集輸入，但內部不再需要提交按鈕
 with st.form(key=f"review_form_{current_image_name}"):
     st.subheader("請勾選所有適用的審核項目 (可複選)：")
     review_status = {}
@@ -135,25 +125,24 @@ with st.form(key=f"review_form_{current_image_name}"):
         review_status[option] = st.checkbox(option, value=(option in previous_options))
     
     notes = st.text_area("補充說明 (選填)", value=previous_notes)
-    # 表單內的按鈕僅用於觸發狀態更新，主要導航由外部按鈕完成
-    st.form_submit_button("同步當前選項")
+    
+    # --- 【修改點】---
+    # st.form_submit_button("同步當前選項")  <-- 此行已被移除
 
-# --- 【修改點】將導覽按鈕放在表單外部 ---
-nav_cols = st.columns([1, 5, 1]) # 使用比例來控制按鈕位置
+# --- 將導覽按鈕放在表單外部 ---
+nav_cols = st.columns([1, 5, 1]) 
 
 with nav_cols[0]:
-    # "返回上一張" 按鈕
     if st.button("返回上一張", use_container_width=True):
         if st.session_state.current_index > 0:
             st.session_state.current_index -= 1
             st.rerun()
 
 with nav_cols[2]:
-    # "儲存並下一張" 按鈕
     if st.button("儲存並下一張", type="primary", use_container_width=True):
         selected_options = [option for option, checked in review_status.items() if checked]
         if not selected_options and not notes:
-            st.warning("請至少選填一個審核項目後儲存再繼續。")
+            st.warning("請至少選填一個審核項目或填寫備註後再儲存。")
         else:
             with st.spinner("正在將結果寫入 Google Sheets..."):
                 review_summary = "; ".join(selected_options)
@@ -165,13 +154,13 @@ with nav_cols[2]:
                     "審核時間 (Timestamp)": pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
                 }])
                 
-                # 永遠都是附加新紀錄
+                # 使用 conn.update 來附加新紀錄
                 conn.update(worksheet="Sheet1", data=new_data)
                 
                 st.success(f"影像 {current_image_name} 的審核結果已成功儲存！")
 
-                # 如果不是最後一張，則前進
                 if st.session_state.current_index < total_files - 1:
                     st.session_state.current_index += 1
-
+                
+                # 重新執行以刷新頁面到下一張圖片或顯示完成訊息
                 st.rerun()
