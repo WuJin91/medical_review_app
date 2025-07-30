@@ -79,12 +79,12 @@ if 'current_index' not in st.session_state:
 # 讀取 GSheet 資料並處理成「每個檔案的最新一筆紀錄」
 try:
     with st.spinner("正在從 Google Sheets 同步進度..."):
-        existing_data = conn.read(worksheet="Sheet1", usecols=list(range(4)), ttl=5)
-        existing_data = existing_data.dropna(how='all')
+        existing_data_full = conn.read(worksheet="Sheet1", usecols=list(range(4)), ttl=5)
+        existing_data_full = existing_data_full.dropna(how='all')
         
-        if not existing_data.empty:
-            existing_data['審核時間 (Timestamp)'] = pd.to_datetime(existing_data['審核時間 (Timestamp)'])
-            latest_reviews_df = existing_data.sort_values(
+        if not existing_data_full.empty:
+            existing_data_full['審核時間 (Timestamp)'] = pd.to_datetime(existing_data_full['審核時間 (Timestamp)'])
+            latest_reviews_df = existing_data_full.sort_values(
                 '審核時間 (Timestamp)', ascending=False
             ).drop_duplicates(subset='影像檔名 (Filename)', keep='first')
         else:
