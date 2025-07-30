@@ -106,7 +106,7 @@ if st.session_state.completion_check and st.session_state.current_index >= total
      st.balloons()
      try:
          sheet_id = st.secrets.connections.gsheets.spreadsheet
-         sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
+         sheet_url = f"https://docs.google.com/spreadsheets/d/1PMz9WT03dOTVnvyYTNzrvPCzgbaa_NSQ3usvb5T_M9o/edit?usp=sharing"
          st.markdown(f"**[點擊這裡查看 Google Sheet 結果]({sheet_url})**")
      except:
          st.info("無法獲取 Google Sheet 連結，但資料已儲存。")
