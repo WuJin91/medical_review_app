@@ -163,14 +163,14 @@ nav_cols = st.columns([1, 5, 1])
 
 with nav_cols[0]:
     # "返回上一張" 按鈕
-    if st.button("⬅️ 返回上一張", use_container_width=True):
+    if st.button("返回上一張", use_container_width=True):
         if st.session_state.current_index > 0:
             st.session_state.current_index -= 1
             st.rerun()
 
 with nav_cols[2]:
     # "儲存並下一張" 按鈕
-    if st.button("儲存並下一張 ➡️", type="primary", use_container_width=True):
+    if st.button("儲存並下一張", type="primary", use_container_width=True):
         selected_options = [option for option, checked in review_status.items() if checked]
         if not selected_options and not notes:
             st.warning("請至少選填一個審核項目後儲存再繼續。")
@@ -178,21 +178,27 @@ with nav_cols[2]:
             with st.spinner("正在將結果寫入 Google Sheets..."):
                 review_summary = "; ".join(selected_options)
                 
-                new_data = pd.DataFrame([{
+                 # --- 【主要修正點】 ---
+                # 1. 建立包含新一筆紀錄的 DataFrame
+                new_row_df = pd.DataFrame([{
                     "影像檔名 (Filename)": current_image_name,
                     "審核結果 (Review)": review_summary,
                     "醫師備註 (Notes)": notes,
                     "審核時間 (Timestamp)": pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
                 }])
                 
-                conn.update(worksheet="Sheet1", data=new_data)
+                # 2. 將新的 DataFrame 與從 GSheet 讀取到的舊資料合併
+                #    注意：我們使用 `existing_data_full`，即未經過去重的完整日誌
+                updated_df = pd.concat([existing_data_full, new_row_df], ignore_index=True)
+                
+                # 3. 將合併後的完整 DataFrame 寫回 Google Sheet，覆蓋整個工作表
+                conn.update(worksheet="Sheet1", data=updated_df)
                 
                 st.success(f"影像 {current_image_name} 的審核結果已成功儲存！")
 
                 if st.session_state.current_index < total_files - 1:
                     st.session_state.current_index += 1
                 
-                # 在儲存後設定 completion_check，避免在最後一頁無法跳轉
                 if len(latest_reviews_df) + 1 >= total_files:
                      st.session_state.completion_check = True
 
