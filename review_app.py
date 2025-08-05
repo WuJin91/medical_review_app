@@ -1,10 +1,10 @@
 # --------------------------------------------------------------------------
-# 醫療影像審核系統 by Streamlit (V14 - 修正背景圖片渲染問題)
+# 醫療影像審核系統 by Streamlit (V15 - 修正 AttributeError 與最終整合)
 #
 # 更新日誌:
-# - 修正了背景圖片無法在畫布上顯示的最終問題。
-# - 改變傳遞給 st_canvas 的 background_image 參數，從傳遞 Pillow Image 物件
-#   改為直接傳遞影像的檔案路徑字串，以獲得最佳相容性。
+# - 修正 'str' object has no attribute 'height' 錯誤。
+# - 明確區分 Pillow 圖片物件（用於計算尺寸）和圖片路徑字串（用於傳遞給畫布）。
+# - 整合所有先前版本的穩定功能。
 # --------------------------------------------------------------------------
 import streamlit as st
 import pandas as pd
@@ -19,7 +19,7 @@ ORIGINAL_IMAGE_DIR = "images"
 LABEL_DIR = "labels"
 CANVAS_DISPLAY_WIDTH = 800
 
-# --- 2. 密碼驗證 (與之前版本相同) ---
+# --- 2. 密碼驗證 ---
 def check_password():
     if "password_correct" in st.session_state and st.session_state["password_correct"]: return True
     st.header("病兆標記審核介面 登入")
@@ -32,7 +32,7 @@ def check_password():
     elif password: st.error("密碼錯誤，請重新輸入。")
     return False
 
-# --- 3. 核心繪圖與資料轉換函數 (與之前版本相同) ---
+# --- 3. 核心繪圖與資料轉換函數 (與 V14 版本相同) ---
 def hex_to_rgba(hex_color, alpha=0.3):
     hex_color = hex_color.lstrip('#'); r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4)); return f"rgba({r}, {g}, {b}, {alpha})"
 
@@ -124,20 +124,23 @@ with col2:
     st.info(f"進度: {current_index + 1} / {total_files} | 目前影像: {current_image_name}")
     try:
         image_path = os.path.join(ORIGINAL_IMAGE_DIR, current_image_name)
-        # 我們仍然需要用 Pillow 打開圖片來取得它的原始尺寸
-        with Image.open(image_path) as bg_image_original:
-            scaling_ratio = CANVAS_DISPLAY_WIDTH / bg_image_original.width
-            display_height = int(bg_image_original.height * scaling_ratio)
-            model_predictions = load_yolo_predictions(current_image_name, bg_image_original.width, bg_image_original.height, CLASS_MAP)
-        
-        initial_drawing, source = load_initial_rects(current_image_name, gsheet_df, model_predictions, LABEL_COLORS, scaling_ratio)
         
         # --- 【主要修正點】 ---
-        # 直接將「影像檔案的路徑字串」傳遞給 background_image 參數
+        # 1. 使用 'with' 陳述式來安全地打開圖片並獲取尺寸
+        with Image.open(image_path) as bg_image:
+            # 2. 使用這個 'bg_image' 物件來計算尺寸和讀取預測
+            scaling_ratio = CANVAS_DISPLAY_WIDTH / bg_image.width
+            display_height = int(bg_image.height * scaling_ratio)
+            model_predictions = load_yolo_predictions(current_image_name, bg_image.width, bg_image.height, CLASS_MAP)
+        
+        # 3. 載入初始標註框
+        initial_drawing, source = load_initial_rects(current_image_name, gsheet_df, model_predictions, LABEL_COLORS, scaling_ratio)
+        
+        # 4. 在呼叫 st_canvas 時，將【圖片路徑字串】傳給 background_image
         canvas_result = st_canvas(
             stroke_width=2,
             stroke_color=stroke_color,
-            background_image=image_path, # <-- 【重要】傳入檔案路徑，而不是 Pillow 物件
+            background_image=image_path, # <-- 傳遞路徑字串
             update_streamlit=True,
             height=display_height,
             width=CANVAS_DISPLAY_WIDTH,
@@ -152,17 +155,16 @@ with col2:
 
 with col3:
     st.subheader("目前標註結果")
-    if canvas_result and canvas_result.json_data:
-        # 注意：scaling_ratio 變數現在在 with Image.open(...) 內部定義，我們需要確保在這裡能取用
-        # 為了簡化，我們在 col2 的 try 區塊外預先定義
-        try:
-            with Image.open(os.path.join(ORIGINAL_IMAGE_DIR, current_image_name)) as img:
-                ratio = CANVAS_DISPLAY_WIDTH / img.width
+    # 為了確保 scaling_ratio 在此處可用，我們再次安全地計算它
+    try:
+        with Image.open(os.path.join(ORIGINAL_IMAGE_DIR, current_image_name)) as img:
+            ratio = CANVAS_DISPLAY_WIDTH / img.width
+        if canvas_result and canvas_result.json_data:
             display_df = convert_canvas_to_df(current_image_name, canvas_result.json_data, LABEL_COLORS, ratio)
             st.dataframe(display_df, use_container_width=True, height=300)
-        except:
-             st.write("無法計算標註結果。")
-    else: st.write("畫布上沒有標註。")
+        else: st.write("畫布上沒有標註。")
+    except:
+        st.write("無法計算標註結果。")
 
     st.divider(); st.write(f"初始標註來源: **{source}**")
     
