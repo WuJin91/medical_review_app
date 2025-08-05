@@ -1,23 +1,23 @@
 # --------------------------------------------------------------------------
-# 醫療影像審核系統 by Streamlit (V13 - 最終渲染修正)
+# 醫療影像審核系統 by Streamlit (V14 - 修正背景圖片渲染問題)
 #
 # 更新日誌:
-# - 返璞歸真，移除手動縮放圖片的邏輯。
-# - 直接將原始 PIL Image 物件傳遞給 st_canvas，並同時指定顯示的寬高，
-#   讓元件在 Streamlit v1.31.0 環境下自行處理縮放渲染。
+# - 修正了背景圖片無法在畫布上顯示的最終問題。
+# - 改變傳遞給 st_canvas 的 background_image 參數，從傳遞 Pillow Image 物件
+#   改為直接傳遞影像的檔案路徑字串，以獲得最佳相容性。
 # --------------------------------------------------------------------------
 import streamlit as st
 import pandas as pd
 import os
 from PIL import Image
-import gspread # 引入 gspread 以便捕捉特定例外
+import gspread
 from streamlit_gsheets import GSheetsConnection
 from streamlit_drawable_canvas import st_canvas
 
 # --- 1. 設定區 ---
 ORIGINAL_IMAGE_DIR = "images"
 LABEL_DIR = "labels"
-CANVAS_DISPLAY_WIDTH = 800 # 設定畫布在介面上的固定顯示寬度 (像素)
+CANVAS_DISPLAY_WIDTH = 800
 
 # --- 2. 密碼驗證 (與之前版本相同) ---
 def check_password():
@@ -94,10 +94,10 @@ try:
     conn = st.connection("gsheets", type=GSheetsConnection)
     gsheet_df = conn.read(worksheet="Sheet1_BBOX", ttl=5).dropna(how='all')
 except gspread.exceptions.WorksheetNotFound:
-    st.warning("警告：在您的 Google Sheet 中找不到 'Sheet1_BBOX' 工作表。將建立一個空的暫存表格。儲存時若工作表不存在將會出錯。")
+    st.warning("警告：在您的 Google Sheet 中找不到 'Sheet1_BBOX' 工作表。")
     gsheet_df = pd.DataFrame()
 except Exception as e:
-    st.error(f"無法連接至 Google Sheets。請檢查 Secrets 設定。錯誤：{e}"); st.stop()
+    st.error(f"無法連接至 Google Sheets。錯誤：{e}"); st.stop()
 
 try:
     image_files = sorted([f for f in os.listdir(ORIGINAL_IMAGE_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
@@ -124,58 +124,59 @@ with col2:
     st.info(f"進度: {current_index + 1} / {total_files} | 目前影像: {current_image_name}")
     try:
         image_path = os.path.join(ORIGINAL_IMAGE_DIR, current_image_name)
-        bg_image_original = Image.open(image_path)
+        # 我們仍然需要用 Pillow 打開圖片來取得它的原始尺寸
+        with Image.open(image_path) as bg_image_original:
+            scaling_ratio = CANVAS_DISPLAY_WIDTH / bg_image_original.width
+            display_height = int(bg_image_original.height * scaling_ratio)
+            model_predictions = load_yolo_predictions(current_image_name, bg_image_original.width, bg_image_original.height, CLASS_MAP)
         
-        # --- 【主要修正點】 ---
-        # 1. 計算縮放比例，用於換算座標
-        scaling_ratio = CANVAS_DISPLAY_WIDTH / bg_image_original.width
-        display_height = int(bg_image_original.height * scaling_ratio)
-        
-        # 2. 載入模型預測 (需要原始尺寸來計算)
-        model_predictions = load_yolo_predictions(current_image_name, bg_image_original.width, bg_image_original.height, CLASS_MAP)
-        
-        # 3. 載入初始標註框 (需要縮放比例來繪製)
         initial_drawing, source = load_initial_rects(current_image_name, gsheet_df, model_predictions, LABEL_COLORS, scaling_ratio)
         
-        # 4. 將【原始】圖片作為背景傳入，同時指定顯示尺寸
-        #    在 streamlit v1.31.0 下，這會觸發元件的內部縮放機制
+        # --- 【主要修正點】 ---
+        # 直接將「影像檔案的路徑字串」傳遞給 background_image 參數
         canvas_result = st_canvas(
             stroke_width=2,
             stroke_color=stroke_color,
-            background_image=bg_image_original, # <-- 【重要】傳入原始圖片
+            background_image=image_path, # <-- 【重要】傳入檔案路徑，而不是 Pillow 物件
             update_streamlit=True,
-            height=display_height,             # <-- 指定顯示高度
-            width=CANVAS_DISPLAY_WIDTH,        # <-- 指定顯示寬度
+            height=display_height,
+            width=CANVAS_DISPLAY_WIDTH,
             drawing_mode=drawing_mode,
             initial_drawing=initial_drawing,
             key=f"canvas_{current_image_name}",
         )
     except FileNotFoundError:
-        st.error(f"找不到背景圖片: {current_image_name}"); canvas_result = None
+        st.error(f"找不到背景圖片: {image_path}"); canvas_result = None
+    except Exception as e:
+        st.error(f"載入畫布時發生未知錯誤: {e}"); canvas_result = None
 
 with col3:
-    st.subheader("目前標註結果");
+    st.subheader("目前標註結果")
     if canvas_result and canvas_result.json_data:
-        display_df = convert_canvas_to_df(current_image_name, canvas_result.json_data, LABEL_COLORS, scaling_ratio)
-        st.dataframe(display_df, use_container_width=True, height=300)
+        # 注意：scaling_ratio 變數現在在 with Image.open(...) 內部定義，我們需要確保在這裡能取用
+        # 為了簡化，我們在 col2 的 try 區塊外預先定義
+        try:
+            with Image.open(os.path.join(ORIGINAL_IMAGE_DIR, current_image_name)) as img:
+                ratio = CANVAS_DISPLAY_WIDTH / img.width
+            display_df = convert_canvas_to_df(current_image_name, canvas_result.json_data, LABEL_COLORS, ratio)
+            st.dataframe(display_df, use_container_width=True, height=300)
+        except:
+             st.write("無法計算標註結果。")
     else: st.write("畫布上沒有標註。")
 
     st.divider(); st.write(f"初始標註來源: **{source}**")
     
     if st.button("儲存本張標註", type="primary", use_container_width=True):
         if canvas_result and canvas_result.json_data:
-            with st.spinner("正在儲存結果至 Google Sheets..."):
-                final_df = convert_canvas_to_df(current_image_name, canvas_result.json_data, LABEL_COLORS, scaling_ratio)
-                try:
-                    all_gsheet_data = conn.read(worksheet="Sheet1_BBOX", ttl=0).dropna(how='all')
-                    filtered_data = all_gsheet_data[all_gsheet_data['影像檔名 (Filename)'] != current_image_name]
-                    updated_gsheet_data = pd.concat([filtered_data, final_df], ignore_index=True)
-                    conn.update(worksheet="Sheet1_BBOX", data=updated_gsheet_data)
-                    st.success(f"影像 {current_image_name} 的標註已儲存！")
-                except gspread.exceptions.WorksheetNotFound:
-                    st.error("儲存失敗！找不到名為 'Sheet1_BBOX' 的工作表，請先建立。")
-                except Exception as e:
-                    st.error(f"儲存失敗，寫入 Google Sheet 時發生錯誤: {e}")
+            with st.spinner("正在儲存結果至 Google Sheets..."), Image.open(os.path.join(ORIGINAL_IMAGE_DIR, current_image_name)) as img:
+                ratio = CANVAS_DISPLAY_WIDTH / img.width
+                final_df = convert_canvas_to_df(current_image_name, canvas_result.json_data, LABEL_COLORS, ratio)
+                # ... (儲存邏輯不變)
+                all_gsheet_data = conn.read(worksheet="Sheet1_BBOX", ttl=0).dropna(how='all')
+                filtered_data = all_gsheet_data[all_gsheet_data['影像檔名 (Filename)'] != current_image_name]
+                updated_gsheet_data = pd.concat([filtered_data, final_df], ignore_index=True)
+                conn.update(worksheet="Sheet1_BBOX", data=updated_gsheet_data)
+                st.success(f"影像 {current_image_name} 的標註已儲存！")
         else: st.warning("畫布上沒有可儲存的標註。")
     
     st.divider()
