@@ -1,205 +1,256 @@
 # --------------------------------------------------------------------------
-# 醫療影像審核系統 by Streamlit (V6 - 修正 NameError 與按鈕邏輯)
+# 醫療影像審核系統 by Streamlit (V9 - 互動式標註最終版)
 #
 # 更新日誌:
-# - 修正 NameError: 將不存在的變數 `previous_review` 改為已定義的 `previous_options`。
-# - 簡化表單邏輯: 移除 st.form 內多餘的 submit button，修正介面警告。
-# - 確保外部按鈕能正確觸發資料儲存與導覽。
+# - 引入 streamlit-drawable-canvas 實現影像標註與修正功能。
+# - 採用三欄式佈局，將工具、畫布、控制面板整合在單一畫面。
+# - 實作了完整的 GSheet 儲存邏輯，以「一個標註框一列」的形式儲存，並支援覆蓋更新。
 # --------------------------------------------------------------------------
-
+# --------------------------------------------------------------------------
+# 醫療影像審核系統 by Streamlit (V10 - 動態讀取 YOLO 預測)
+#
+# 更新日誌:
+# - 移除寫死的 MOCK_PREDICTIONS。
+# - 新增 load_yolo_predictions 函數，用於讀取、解析、轉換真實的 YOLO .txt 預測檔。
+# - 主程式流程現在會為每一張圖片動態載入其對應的預測作為初始標註框。
+# --------------------------------------------------------------------------
 import streamlit as st
 import pandas as pd
 import os
 from PIL import Image
 from streamlit_gsheets import GSheetsConnection
+from streamlit_drawable_canvas import st_canvas
 
 # --- 1. 設定區 ---
 ORIGINAL_IMAGE_DIR = "images"
-PREDICTED_IMAGE_DIR = "predicted_images"
+YOLO_LABELS_DIR = "yolo_labels" # <--- 新增：YOLO 預測檔的路徑
 
-REVIEW_OPTIONS = [
-    "標記完全正確",
-    "有未標記出的病兆 (漏標)",
-    "病兆名稱標記錯誤",
-    "標記框不精準",
-    "標記了不存在病兆的位置",
-    "其他問題 (請在備註說明)"
-]
-
-# --- 2. 密碼驗證與主應用程式邏輯 ---
-
+# --- 2. 密碼驗證 (與之前版本相同，此處省略) ---
 def check_password():
-    """使用 st.secrets 中的密碼進行驗證"""
+    # ... (您的 check_password 函數) ...
     if "password_correct" in st.session_state and st.session_state["password_correct"]:
         return True
-    
     st.header("病兆標記審核介面 登入")
     password = st.text_input("輸入密碼 (Password)", type="password")
-    
     correct_password = st.secrets.get("APP_PASSWORD", "123")
-    if not correct_password:
-        st.error("錯誤：找不到設定的 APP_PASSWORD。請確認您的 secrets.toml 檔案已正確設定。")
-        return False
-
     if password and password == correct_password:
         st.session_state["password_correct"] = True
         st.rerun()
         return True
-    elif password:
-        st.error("密碼錯誤，請重新輸入。")
-    
+    elif password: st.error("密碼錯誤")
     return False
+
+# --- 3. 核心繪圖與資料轉換函數 (新增 load_yolo_predictions) ---
+
+def load_yolo_predictions(image_filename, image_width, image_height, class_map):
+    """從 .txt 檔案讀取 YOLO 預測，並轉換為絕對像素座標"""
+    label_path = os.path.join(YOLO_LABELS_DIR, os.path.splitext(image_filename)[0] + '.txt')
+    predictions = []
+    if not os.path.exists(label_path):
+        return predictions # 如果沒有對應的預測檔，返回空列表
+
+    with open(label_path, 'r') as f:
+        for line in f.readlines():
+            try:
+                class_id, x_center, y_center, width, height = map(float, line.strip().split())
+                
+                # 將標準化座標轉換為絕對像素座標
+                abs_width = width * image_width
+                abs_height = height * image_height
+                abs_x = (x_center * image_width) - (abs_width / 2)
+                abs_y = (y_center * image_height) - (abs_height / 2)
+                
+                label = class_map.get(int(class_id), "unknown") # 從 class_id 查找類別名稱
+                
+                predictions.append({
+                    "label": label,
+                    "box": [abs_x, abs_y, abs_width, abs_height]
+                })
+            except ValueError:
+                # 忽略格式不正確的行
+                continue
+    return predictions
+
+def hex_to_rgba(hex_color, alpha=0.3):
+    hex_color = hex_color.lstrip('#')
+    r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+def convert_canvas_to_df(image_filename, canvas_json_data, label_color_map):
+    # ... (此函數與 V9 版本相同) ...
+    records = []
+    color_label_map = {v.upper(): k for k, v in label_color_map.items()}
+    if canvas_json_data and 'objects' in canvas_json_data:
+        for obj in canvas_json_data['objects']:
+            if obj['type'] == 'rect':
+                label = color_label_map.get(obj['stroke'].upper(), "unknown")
+                records.append({
+                    "影像檔名 (Filename)": image_filename, "類別 (Label)": label,
+                    "x": int(obj['left']), "y": int(obj['top']),
+                    "width": int(obj['width']), "height": int(obj['height']),
+                    "審核時間 (Timestamp)": pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
+                })
+    return pd.DataFrame(records)
+
+def load_initial_rects(image_filename, gsheet_df, predictions_for_image, label_color_map):
+    # ... (此函數與 V9 版本相同，但傳入的 predictions 參數已是動態的) ...
+    rects = []
+    source = "無"
+    if not gsheet_df.empty and image_filename in gsheet_df['影像檔名 (Filename)'].values:
+        source = "Google Sheet"
+        image_annotations = gsheet_df[gsheet_df['影像檔名 (Filename)'] == image_filename]
+        for _, row in image_annotations.iterrows():
+            stroke_color = label_color_map.get(row['類別 (Label)'], "#FFFFFF")
+            rects.append({
+                "type": "rect", "left": row['x'], "top": row['y'],
+                "width": row['width'], "height": row['height'],
+                "stroke": stroke_color, "strokeWidth": 2, 
+                "fill": hex_to_rgba(stroke_color)
+            })
+    elif predictions_for_image:
+        source = "模型預測"
+        for pred in predictions_for_image:
+            label, box = pred['label'], pred['box']
+            stroke_color = label_color_map.get(label, "#FFFFFF")
+            rects.append({
+                "type": "rect", "left": box[0], "top": box[1],
+                "width": box[2], "height": box[3],
+                "stroke": stroke_color, "strokeWidth": 2, 
+                "fill": hex_to_rgba(stroke_color)
+            })
+    return {"objects": rects}, source
+
+# --- Streamlit App 主體 ---
+st.set_page_config(layout="wide", page_title="互動式影像標註系統")
 
 if not check_password():
     st.stop()
 
-st.set_page_config(layout="wide", page_title="醫師影像審核系統")
-st.title("病兆標記審核介面")
-st.text("標記類別：瘜肉(polyp)、腫瘤(tumor)、無病兆(No)")
+st.title("互動式病兆標註介面")
 
-# --- 建立與 Google Sheets 的連接 ---
+# --- 設定類別與顏色的對應 ---
+CLASS_MAP = {0: "polyp", 1: "tumor"} # <--- 重要：請根據您的 YOLO 模型設定
+LABEL_COLORS = {"polyp": "#FF0000", "tumor": "#0000FF"}
+
+# --- 連接 GSheet 並讀取資料 ... (與 V9 版本相同) ---
 try:
     conn = st.connection("gsheets", type=GSheetsConnection)
+    gsheet_df = conn.read(worksheet="Sheet1_BBOX", ttl=5).dropna(how='all')
 except Exception as e:
-    st.error(f"無法連接至 Google Sheets。請檢查您的 secrets.toml 設定是否正確。錯誤訊息：{e}")
-    st.stop()
+    st.error(f"無法連接或讀取 Google Sheets。請檢查您的 secrets.toml 和工作表名稱 'Sheet1_BBOX' 是否正確。錯誤：{e}")
+    gsheet_df = pd.DataFrame() # 如果讀取失敗，則建立一個空的 DataFrame
 
-# 讀取所有本地影像檔案列表
+# --- 讀取本地影像檔案列表 ---
 try:
     image_files = sorted([f for f in os.listdir(ORIGINAL_IMAGE_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
     total_files = len(image_files)
+    if total_files == 0:
+        st.error(f"錯誤：在資料夾 '{ORIGINAL_IMAGE_DIR}' 中找不到任何影像檔案。")
+        st.stop()
 except FileNotFoundError:
     st.error(f"錯誤：找不到本地影像資料夾 '{ORIGINAL_IMAGE_DIR}'。")
     st.stop()
-
-# 引入 session_state 來管理當前頁碼
+    
+# --- Session State 管理當前頁碼 ... (與 V9 版本相同) ---
+# ...
 if 'current_index' not in st.session_state:
     st.session_state.current_index = 0
 
-# 讀取 GSheet 資料並處理成「每個檔案的最新一筆紀錄」
-try:
-    with st.spinner("正在從 Google Sheets 同步進度..."):
-        existing_data_full = conn.read(worksheet="Sheet1", usecols=list(range(4)), ttl=5)
-        existing_data_full = existing_data_full.dropna(how='all')
-        
-        if not existing_data_full.empty:
-            existing_data_full['審核時間 (Timestamp)'] = pd.to_datetime(existing_data_full['審核時間 (Timestamp)'])
-            latest_reviews_df = existing_data_full.sort_values(
-                '審核時間 (Timestamp)', ascending=False
-            ).drop_duplicates(subset='影像檔名 (Filename)', keep='first')
-        else:
-            latest_reviews_df = pd.DataFrame()
-
-except Exception as e:
-    st.error(f"讀取 Google Sheet 'Sheet1' 失敗。請確認工作表名稱和權限設定是否正確。錯誤訊息：{e}")
-    st.stop()
-
-# 檢查是否所有影像都已審核完畢
-if 'completion_check' not in st.session_state:
-    st.session_state.completion_check = False
-
-if len(latest_reviews_df) >= total_files:
-    st.session_state.completion_check = True
-
-if st.session_state.completion_check and st.session_state.current_index >= total_files - 1:
-     st.success("🎉 所有影像皆已審核完畢！感謝您的辛勞。")
-     st.balloons()
-     try:
-         sheet_id = st.secrets.connections.gsheets.spreadsheet
-         sheet_url = f"https://docs.google.com/spreadsheets/d/1PMz9WT03dOTVnvyYTNzrvPCzgbaa_NSQ3usvb5T_M9o/edit?usp=sharing"
-         st.markdown(f"**[點擊這裡查看 Google Sheet 結果]({sheet_url})**")
-     except:
-         st.info("無法獲取 Google Sheet 連結，但資料已儲存。")
-     st.stop()
-
-# 獲取當前要顯示的影像
 current_index = st.session_state.current_index
 current_image_name = image_files[current_index]
 
-# 讀取此影像之前的審核記錄，用於恢復介面狀態
-if not latest_reviews_df.empty and current_image_name in latest_reviews_df['影像檔名 (Filename)'].values:
-    previous_review_series = latest_reviews_df.loc[latest_reviews_df['影像檔名 (Filename)'] == current_image_name].iloc[0]
-    previous_options = previous_review_series.get('審核結果 (Review)', '').split('; ')
-    previous_notes = previous_review_series.get('醫師備註 (Notes)', '')
-else:
-    previous_options = []
-    previous_notes = ""
-    
-# --- 3. 介面佈局 ---
-progress_text = f"進度: {current_index + 1} / {total_files}"
-st.info(progress_text)
+# --- 主要介面佈局 (與 V9 版本相同) ---
+col1, col2, col3 = st.columns([0.2, 0.55, 0.25])
 
-col1, col2 = st.columns(2)
+# --- 左側欄：工具箱 (與 V9 版本相同) ---
 with col1:
-    st.subheader(f"原始影像: {current_image_name}")
-    st.image(os.path.join(ORIGINAL_IMAGE_DIR, current_image_name), use_container_width=True)
+    st.subheader("🛠️ 工具箱")
+    drawing_mode = st.radio("工具:", ("transform", "rect"), horizontal=True, captions=["移動/編輯", "畫新矩形"])
+    selected_label = st.radio("標註類別:", list(LABEL_COLORS.keys()))
+    stroke_color = LABEL_COLORS[selected_label]
+    st.write(f"目前顏色: <span style='color:{stroke_color}'>██</span> ({selected_label})", unsafe_allow_html=True)
+    st.divider()
+    st.markdown("""
+    **操作說明:**
+    1. **移動/編輯**: 點選、移動、縮放現有標註框。
+    2. **畫新矩形**: 先選好上方類別，再畫出新的標註框。
+    3. **刪除**: 點選一個標註框後，按下鍵盤上的 `Delete` 鍵。
+    4. **儲存**: 完成後點擊右方的儲存按鈕。
+    """)
+
+# --- 中間欄：畫布工作區 ---
 with col2:
-    st.subheader(f"模型標記影像: {current_image_name}")
-    st.image(os.path.join(PREDICTED_IMAGE_DIR, current_image_name), use_container_width=True)
-st.markdown("---")
+    st.info(f"進度: {current_index + 1} / {total_files} | 目前影像: {current_image_name}")
+    
+    try:
+        bg_image = Image.open(os.path.join(ORIGINAL_IMAGE_DIR, current_image_name))
+        
+        # --- 【主要修改點】動態載入真實預測 ---
+        # 1. 取得圖片實際尺寸
+        img_width, img_height = bg_image.size
+        # 2. 呼叫新函數，讀取此圖片的 YOLO 預測
+        predictions_for_image = load_yolo_predictions(current_image_name, img_width, img_height, CLASS_MAP)
+        # 3. 將真實預測傳入，以載入初始標註框
+        initial_drawing, source = load_initial_rects(current_image_name, gsheet_df, predictions_for_image, LABEL_COLORS)
+        
+        canvas_result = st_canvas(
+            # ... (canvas 參數與 V9 版本相同) ...
+            stroke_width=2,
+            stroke_color=stroke_color,
+            background_image=bg_image,
+            update_streamlit=True,
+            height=img_height,
+            width=img_width,
+            drawing_mode=drawing_mode,
+            initial_drawing=initial_drawing,
+            key=f"canvas_{current_image_name}",
+        )
+    except FileNotFoundError:
+        st.error(f"找不到背景圖片: {current_image_name}")
+        canvas_result = None
 
+# --- 右側欄：資料與控制 (與 V9 版本相同) ---
+with col3:
+    st.subheader("📊 目前標註結果")
+    
+    if canvas_result and canvas_result.json_data:
+        display_df = convert_canvas_to_df(current_image_name, canvas_result.json_data, LABEL_COLORS)
+        st.dataframe(display_df, use_container_width=True, height=300)
+    else:
+        st.write("畫布上沒有標註。")
 
-# --- 【修改點】將所有輸入元件移出 st.form ---
-# st.form 在這種複雜導航情境下會產生問題，我們直接使用 Streamlit 的即時狀態更新。
-st.subheader("請勾選所有適用的審核項目 (可複選)：")
-
-# 使用一個字典來收集每個 checkbox 的狀態
-# 每個元件的 key 必須是唯一的，以確保狀態正確保存
-review_status = {}
-for option in REVIEW_OPTIONS:
-    # --- 【主要修正點】修正 NameError ---
-    # 將 previous_review["options"] 改為正確的變數 previous_options
-    review_status[option] = st.checkbox(
-        option, 
-        value=(option in previous_options), 
-        key=f"cb_{current_image_name}_{option}" # 使用更穩定的 key
-    )
-
-notes = st.text_area("補充說明 (選填)", value=previous_notes, key=f"notes_{current_image_name}")
-
-# --- 將導覽按鈕放在頁面底部 ---
-st.markdown("---") # 分隔線
-nav_cols = st.columns([1, 5, 1])
-
-with nav_cols[0]:
-    # "返回上一張" 按鈕
-    if st.button("返回上一張", use_container_width=True):
-        if st.session_state.current_index > 0:
-            st.session_state.current_index -= 1
-            st.rerun()
-
-with nav_cols[2]:
-    # "儲存並下一張" 按鈕
-    if st.button("儲存並下一張", type="primary", use_container_width=True):
-        selected_options = [option for option, checked in review_status.items() if checked]
-        if not selected_options and not notes:
-            st.warning("請至少選填一個審核項目後儲存再繼續。")
+    st.divider()
+    st.write(f"初始標註來源: **{source}**")
+    
+    if st.button("💾 儲存本張標註", type="primary", use_container_width=True):
+        if canvas_result and canvas_result.json_data:
+            with st.spinner("正在儲存結果至 Google Sheets..."):
+                new_annotations_df = convert_canvas_to_df(current_image_name, canvas_result.json_data, LABEL_COLORS)
+                
+                # 讀取 GSheet 現有全部資料
+                all_gsheet_data = conn.read(worksheet="Sheet1_BBOX", ttl=0).dropna(how='all')
+                
+                # 刪除其中屬於 current_image_name 的所有舊紀錄
+                filtered_data = all_gsheet_data[all_gsheet_data['影像檔名 (Filename)'] != current_image_name]
+                
+                # 將新的標註資料與過濾後的舊資料合併
+                updated_gsheet_data = pd.concat([filtered_data, new_annotations_df], ignore_index=True)
+                
+                # 將合併後的完整資料寫回 GSheet
+                conn.update(worksheet="Sheet1_BBOX", data=updated_gsheet_data)
+                
+                st.success(f"影像 {current_image_name} 的標註已儲存！")
         else:
-            with st.spinner("正在將結果寫入 Google Sheets..."):
-                review_summary = "; ".join(selected_options)
-                
-                 # --- 【主要修正點】 ---
-                # 1. 建立包含新一筆紀錄的 DataFrame
-                new_row_df = pd.DataFrame([{
-                    "影像檔名 (Filename)": current_image_name,
-                    "審核結果 (Review)": review_summary,
-                    "醫師備註 (Notes)": notes,
-                    "審核時間 (Timestamp)": pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
-                }])
-                
-                # 2. 將新的 DataFrame 與從 GSheet 讀取到的舊資料合併
-                #    注意：我們使用 `existing_data_full`，即未經過去重的完整日誌
-                updated_df = pd.concat([existing_data_full, new_row_df], ignore_index=True)
-                
-                # 3. 將合併後的完整 DataFrame 寫回 Google Sheet，覆蓋整個工作表
-                conn.update(worksheet="Sheet1", data=updated_df)
-                
-                st.success(f"影像 {current_image_name} 的審核結果已成功儲存！")
+            st.warning("畫布上沒有可儲存的標註。")
 
-                if st.session_state.current_index < total_files - 1:
-                    st.session_state.current_index += 1
-                
-                if len(latest_reviews_df) + 1 >= total_files:
-                     st.session_state.completion_check = True
-
+    nav_cols = st.columns(2)
+    with nav_cols[0]:
+        if st.button("⬅️ 上一張", use_container_width=True):
+            if st.session_state.current_index > 0:
+                st.session_state.current_index -= 1
+                st.rerun()
+    with nav_cols[1]:
+        if st.button("下一張 ➡️", use_container_width=True):
+            if st.session_state.current_index < total_files - 1:
+                st.session_state.current_index += 1
                 st.rerun()
