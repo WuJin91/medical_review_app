@@ -1,9 +1,9 @@
 # Core Streamlit App & Data Handling
-streamlit
+streamlit>=1.30.0
 pandas
 openpyxl
 Pillow
 
 # Connection & Annotation Components
 st-gsheets-connection
-streamlit-drawable-canvas
+streamlit-drawable-canvas==0.9.3
