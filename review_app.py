@@ -1,10 +1,11 @@
 # --------------------------------------------------------------------------
-# 醫療影像審核系統 by Streamlit (V15 - 修正 AttributeError 與最終整合)
+# 醫療影像審核系統 by Streamlit (V16 - 極簡渲染修正)
 #
 # 更新日誌:
-# - 修正 'str' object has no attribute 'height' 錯誤。
-# - 明確區分 Pillow 圖片物件（用於計算尺寸）和圖片路徑字串（用於傳遞給畫布）。
-# - 整合所有先前版本的穩定功能。
+# - 移除所有手動影像縮放、比例計算的邏輯，回歸最簡化的渲染方式。
+# - 直接將原始 Pillow Image 物件傳給 st_canvas，並移除 width/height 參數，
+#   讓元件自行根據圖片尺寸決定畫布大小。
+# - 所有座標處理（讀取、儲存）都使用圖片的原始像素座標。
 # --------------------------------------------------------------------------
 import streamlit as st
 import pandas as pd
@@ -17,9 +18,8 @@ from streamlit_drawable_canvas import st_canvas
 # --- 1. 設定區 ---
 ORIGINAL_IMAGE_DIR = "images"
 LABEL_DIR = "labels"
-CANVAS_DISPLAY_WIDTH = 800
 
-# --- 2. 密碼驗證 ---
+# --- 2. 密碼驗證 (與之前版本相同) ---
 def check_password():
     if "password_correct" in st.session_state and st.session_state["password_correct"]: return True
     st.header("病兆標記審核介面 登入")
@@ -32,11 +32,11 @@ def check_password():
     elif password: st.error("密碼錯誤，請重新輸入。")
     return False
 
-# --- 3. 核心繪圖與資料轉換函數 (與 V14 版本相同) ---
+# --- 3. 核心繪圖與資料轉換函數 (移除 scaling_ratio) ---
 def hex_to_rgba(hex_color, alpha=0.3):
     hex_color = hex_color.lstrip('#'); r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4)); return f"rgba({r}, {g}, {b}, {alpha})"
 
-def convert_canvas_to_df(image_filename, canvas_json_data, label_color_map, scaling_ratio):
+def convert_canvas_to_df(image_filename, canvas_json_data, label_color_map):
     records = []; color_label_map = {v.upper(): k for k, v in label_color_map.items()}
     if canvas_json_data and 'objects' in canvas_json_data:
         for obj in canvas_json_data['objects']:
@@ -44,8 +44,8 @@ def convert_canvas_to_df(image_filename, canvas_json_data, label_color_map, scal
                 label = color_label_map.get(obj['stroke'].upper(), "unknown")
                 records.append({
                     "影像檔名 (Filename)": image_filename, "類別 (Label)": label,
-                    "x": int(obj['left'] / scaling_ratio), "y": int(obj['top'] / scaling_ratio),
-                    "width": int(obj['width'] / scaling_ratio), "height": int(obj['height'] / scaling_ratio),
+                    "x": int(obj['left']), "y": int(obj['top']),
+                    "width": int(obj['width']), "height": int(obj['height']),
                     "審核時間 (Timestamp)": pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
                 })
     return pd.DataFrame(records)
@@ -65,20 +65,20 @@ def load_yolo_predictions(image_filename, image_width, image_height, class_map):
                     predictions.append({"label": label, "box": [left, top, abs_width, abs_height]})
     return predictions
 
-def load_initial_rects(image_filename, gsheet_df, model_predictions, label_color_map, scaling_ratio):
+def load_initial_rects(image_filename, gsheet_df, model_predictions, label_color_map):
     rects = []; source = "無"
     if not gsheet_df.empty and image_filename in gsheet_df['影像檔名 (Filename)'].values:
         source = "Google Sheet"
         image_annotations = gsheet_df[gsheet_df['影像檔名 (Filename)'] == image_filename]
         for _, row in image_annotations.iterrows():
             stroke_color = label_color_map.get(row['類別 (Label)'], "#FFFFFF")
-            rects.append({"type": "rect", "left": row['x'] * scaling_ratio, "top": row['y'] * scaling_ratio, "width": row['width'] * scaling_ratio, "height": row['height'] * scaling_ratio, "stroke": stroke_color, "strokeWidth": 2, "fill": hex_to_rgba(stroke_color)})
+            rects.append({"type": "rect", "left": row['x'], "top": row['y'], "width": row['width'], "height": row['height'], "stroke": stroke_color, "strokeWidth": 2, "fill": hex_to_rgba(stroke_color)})
     elif model_predictions:
         source = "模型預測"
         for pred in model_predictions:
             label, box = pred['label'], pred['box']
             stroke_color = label_color_map.get(label, "#FFFFFF")
-            rects.append({"type": "rect", "left": box[0] * scaling_ratio, "top": box[1] * scaling_ratio, "width": box[2] * scaling_ratio, "height": box[3] * scaling_ratio, "stroke": stroke_color, "strokeWidth": 2, "fill": hex_to_rgba(stroke_color)})
+            rects.append({"type": "rect", "left": box[0], "top": box[1], "width": box[2], "height": box[3], "stroke": stroke_color, "strokeWidth": 2, "fill": hex_to_rgba(stroke_color)})
     return {"objects": rects}, source
 
 # --- Streamlit App 主體 ---
@@ -124,56 +124,45 @@ with col2:
     st.info(f"進度: {current_index + 1} / {total_files} | 目前影像: {current_image_name}")
     try:
         image_path = os.path.join(ORIGINAL_IMAGE_DIR, current_image_name)
+        bg_image = Image.open(image_path)
         
         # --- 【主要修正點】 ---
-        # 1. 使用 'with' 陳述式來安全地打開圖片並獲取尺寸
-        with Image.open(image_path) as bg_image:
-            # 2. 使用這個 'bg_image' 物件來計算尺寸和讀取預測
-            scaling_ratio = CANVAS_DISPLAY_WIDTH / bg_image.width
-            display_height = int(bg_image.height * scaling_ratio)
-            model_predictions = load_yolo_predictions(current_image_name, bg_image.width, bg_image.height, CLASS_MAP)
+        # 1. 直接使用圖片原始尺寸讀取預測
+        model_predictions = load_yolo_predictions(current_image_name, bg_image.width, bg_image.height, CLASS_MAP)
         
-        # 3. 載入初始標註框
-        initial_drawing, source = load_initial_rects(current_image_name, gsheet_df, model_predictions, LABEL_COLORS, scaling_ratio)
+        # 2. 載入初始標註框時不再需要縮放比例
+        initial_drawing, source = load_initial_rects(current_image_name, gsheet_df, model_predictions, LABEL_COLORS)
         
-        # 4. 在呼叫 st_canvas 時，將【圖片路徑字串】傳給 background_image
+        # 3. 移除 width 和 height 參數，讓畫布自行決定大小
         canvas_result = st_canvas(
             stroke_width=2,
             stroke_color=stroke_color,
-            background_image=image_path, # <-- 傳遞路徑字串
+            background_image=bg_image, # 傳入原始 Pillow 圖片物件
             update_streamlit=True,
-            height=display_height,
-            width=CANVAS_DISPLAY_WIDTH,
+            # height 和 width 參數被移除
             drawing_mode=drawing_mode,
             initial_drawing=initial_drawing,
             key=f"canvas_{current_image_name}",
         )
-    except FileNotFoundError:
-        st.error(f"找不到背景圖片: {image_path}"); canvas_result = None
     except Exception as e:
         st.error(f"載入畫布時發生未知錯誤: {e}"); canvas_result = None
 
 with col3:
-    st.subheader("目前標註結果")
-    # 為了確保 scaling_ratio 在此處可用，我們再次安全地計算它
-    try:
-        with Image.open(os.path.join(ORIGINAL_IMAGE_DIR, current_image_name)) as img:
-            ratio = CANVAS_DISPLAY_WIDTH / img.width
-        if canvas_result and canvas_result.json_data:
-            display_df = convert_canvas_to_df(current_image_name, canvas_result.json_data, LABEL_COLORS, ratio)
-            st.dataframe(display_df, use_container_width=True, height=300)
-        else: st.write("畫布上沒有標註。")
-    except:
-        st.write("無法計算標註結果。")
+    st.subheader("📊 目前標註結果")
+    if canvas_result and canvas_result.json_data:
+        # 移除 scaling_ratio
+        display_df = convert_canvas_to_df(current_image_name, canvas_result.json_data, LABEL_COLORS)
+        st.dataframe(display_df, use_container_width=True, height=300)
+    else: st.write("畫布上沒有標註。")
 
     st.divider(); st.write(f"初始標註來源: **{source}**")
     
-    if st.button("儲存本張標註", type="primary", use_container_width=True):
+    if st.button("💾 儲存本張標註", type="primary", use_container_width=True):
         if canvas_result and canvas_result.json_data:
-            with st.spinner("正在儲存結果至 Google Sheets..."), Image.open(os.path.join(ORIGINAL_IMAGE_DIR, current_image_name)) as img:
-                ratio = CANVAS_DISPLAY_WIDTH / img.width
-                final_df = convert_canvas_to_df(current_image_name, canvas_result.json_data, LABEL_COLORS, ratio)
-                # ... (儲存邏輯不變)
+            with st.spinner("正在儲存結果至 Google Sheets..."):
+                # 移除 scaling_ratio
+                final_df = convert_canvas_to_df(current_image_name, canvas_result.json_data, LABEL_COLORS)
+                
                 all_gsheet_data = conn.read(worksheet="Sheet1_BBOX", ttl=0).dropna(how='all')
                 filtered_data = all_gsheet_data[all_gsheet_data['影像檔名 (Filename)'] != current_image_name]
                 updated_gsheet_data = pd.concat([filtered_data, final_df], ignore_index=True)
@@ -184,8 +173,8 @@ with col3:
     st.divider()
     nav_cols = st.columns(2)
     with nav_cols[0]:
-        if st.button("上一張", use_container_width=True):
+        if st.button("⬅️ 上一張", use_container_width=True):
             if st.session_state.current_index > 0: st.session_state.current_index -= 1; st.rerun()
     with nav_cols[1]:
-        if st.button("下一張", use_container_width=True):
+        if st.button("下一張 ➡️", use_container_width=True):
             if st.session_state.current_index < total_files - 1: st.session_state.current_index += 1; st.rerun()
